@@ -1,5 +1,8 @@
 # Dynamic Bombsite Limiter
 
+<img width="895" height="606" alt="image" src="https://github.com/user-attachments/assets/5ee9e5d4-1c13-441e-ac8d-62f75c5c8205" />
+
+
 Dynamic Bombsite Limiter is a [CounterStrikeSharp](https://github.com/roflmuffin/CounterStrikeSharp) plugin for Counter-Strike 2 servers.
 
 It allows server administrators to define custom 3D barriers around bombsites or other areas of a map. The barriers are enabled automatically when the number of active players falls below a configurable threshold, making it possible to limit the playable bombsite area on low-population servers.
