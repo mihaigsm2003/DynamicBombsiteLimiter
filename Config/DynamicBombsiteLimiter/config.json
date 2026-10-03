@@ -1,0 +1,16 @@
+{
+  "Enabled": true,
+  "MinPlayersPerTeam": 5,
+  "BlockedBombsite": "B",
+  "CountBots": false,
+  "ShowBarriersPermanently": true,
+  "BarrierAction": "Wall",
+  "HurtDamage": 10,
+  "BounceSpeed": 300,
+  "BounceUpwardVelocity": 100,
+  "BarrierMessage": "Nu poti trece de aceasta bariera. Bombsite-ul {bombsite} este inchis.",
+  "RoundStartHudDelaySeconds": 5,
+  "RoundStartHudRepeatDelaySeconds": 2.5,
+  "RoundStartMessage": "Bombsite-ul {bombsite} este inchis in aceasta runda.",
+  "RoundStartOpenMessage": "Ambele bombsite-uri sunt deschise in aceasta runda."
+}

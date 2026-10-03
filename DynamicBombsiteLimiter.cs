@@ -10,7 +10,6 @@ namespace DynamicBombsiteLimiter;
 
 public sealed class DynamicBombsiteLimiter : BasePlugin
 {
-    private const int PlayerCountUpdateIntervalTicks = 16;
     private const float BarrierMessageCooldownSeconds = 2.0f;
     private const string ChatPrefix = " \x04[DBL]\x01";
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -26,14 +25,19 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     private Config config = new();
     private MapConfig mapConfig = new();
     private string mapName = string.Empty;
-    private int activePlayerCount;
-    private int ticksUntilPlayerCountUpdate;
+    private string? roundStartHudMessage;
+    private float roundStartHudExpiresAt;
+    private bool roundStartHudRestricted;
+    private int terroristPlayerCount;
+    private int counterTerroristPlayerCount;
+    private int roundSequence;
+    private bool barrierDrawingScheduled;
     private bool barriersActive;
     private bool mapInitialized;
 
     public override string ModuleName => "DynamicBombsiteLimiter";
-    public override string ModuleVersion => "0.1.0";
-    public override string ModuleAuthor => "MihaiGsm2003";
+    public override string ModuleVersion => "1.0.0";
+    public override string ModuleAuthor => "GSM-RO";
     public override string ModuleDescription => "Configurable logical bombsite barriers.";
 
     public override void Load(bool hotReload)
@@ -61,6 +65,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         spawnPositions.Clear();
         lastActionTimes.Clear();
         lastBarrierMessageTimes.Clear();
+        roundStartHudMessage = null;
         foreach (var barrier in mapConfig.Barriers)
         {
             barrier.ClearDraw();
@@ -111,8 +116,12 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         var first = selection.FirstPoint;
         var barrier = Barrier.Create($"Barrier_{mapConfig.Barriers.Count + 1}", new Vector(first.X, first.Y, first.Z), point);
         mapConfig.Barriers.Add(barrier);
-        barrier.Draw();
-        Reply(player, $"Bariera #{mapConfig.Barriers.Count} creata si afisata: {Format(barrier)}");
+        if (barriersActive)
+        {
+            barrier.Draw();
+        }
+
+        Reply(player, $"Bariera #{mapConfig.Barriers.Count} creata{(barriersActive ? " si afisata" : "")}: {Format(barrier)}");
         return HookResult.Continue;
     }
 
@@ -121,17 +130,25 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         lastValidPositions.Clear();
         lastActionTimes.Clear();
         lastBarrierMessageTimes.Clear();
-        UpdateBarrierState();
-        if (barriersActive)
+        roundStartHudMessage = null;
+        UpdateBarrierStateForRound();
+        if (!barriersActive)
         {
-            foreach (var player in Utilities.GetPlayers())
-            {
-                if (player.IsValid && IsActiveTeam(player.Team))
-                {
-                    SendConfiguredMessage(player, config.RoundStartMessage);
-                }
-            }
+            ClearConfiguredBarrierDrawings();
         }
+
+        var roundMessage = barriersActive ? config.RoundStartMessage : config.RoundStartOpenMessage;
+        var currentRoundSequence = ++roundSequence;
+        if (barriersActive && config.ShowBarriersPermanently)
+        {
+            ScheduleConfiguredBarrierDrawing();
+        }
+
+        ScheduleRoundStartAnnouncement(
+            currentRoundSequence,
+            roundMessage,
+            Math.Max(0.0f, config.RoundStartHudDelaySeconds),
+            barriersActive);
 
         return HookResult.Continue;
     }
@@ -150,18 +167,22 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
     private void OnMapStart(string newMapName)
     {
+        roundSequence++;
         pendingSelections.Clear();
         lastValidPositions.Clear();
         spawnPositions.Clear();
         lastActionTimes.Clear();
         lastBarrierMessageTimes.Clear();
+        roundStartHudMessage = null;
         LoadMapConfig(newMapName);
         mapInitialized = true;
-        UpdateBarrierState();
+        barriersActive = false;
     }
 
     private void OnTick()
     {
+        RefreshRoundStartHud();
+
         if (!mapInitialized)
         {
             if (!TrySetMapName(Server.MapName))
@@ -174,12 +195,6 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             Logger.LogInformation("{PluginName} initialized for map {MapName} with {BarrierCount} configured barriers.", ModuleName, mapName, mapConfig.Barriers.Count);
         }
 
-        if (ticksUntilPlayerCountUpdate-- <= 0)
-        {
-            ticksUntilPlayerCountUpdate = PlayerCountUpdateIntervalTicks;
-            UpdateBarrierState();
-        }
-
         if (!barriersActive)
         {
             return;
@@ -187,13 +202,13 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
         foreach (var player in Utilities.GetPlayers())
         {
-            if (player is not { IsValid: true, PawnIsAlive: true } || !IsActiveTeam(player.Team))
+            if (player is not { IsValid: true } || !IsActiveTeam(player.Team))
             {
                 continue;
             }
 
             var pawn = player.PlayerPawn.Value;
-            if (pawn is null || !pawn.IsValid || pawn.AbsOrigin is null)
+            if (pawn is null || !pawn.IsValid || pawn.Health <= 0 || pawn.AbsOrigin is null)
             {
                 continue;
             }
@@ -250,6 +265,12 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
     private void PreviewCommand(CCSPlayerController? player, CommandInfo command)
     {
+        if (!barriersActive)
+        {
+            Reply(player, "Barierele nu sunt active. Wireframe-ul va fi afisat cand devin active.");
+            return;
+        }
+
         foreach (var barrier in mapConfig.Barriers)
         {
             barrier.Draw();
@@ -266,13 +287,12 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         lastBarrierMessageTimes.Clear();
         LoadMapConfig(mapName);
         mapInitialized = !string.IsNullOrWhiteSpace(mapName);
-        UpdateBarrierState();
         Reply(player, $"Configuratia pentru {mapName} a fost reincarcata ({mapConfig.Barriers.Count} bariere).");
     }
 
     private void StatusCommand(CCSPlayerController? player, CommandInfo command)
     {
-        Reply(player, $"Players: {activePlayerCount}; Required: {config.MinPlayers}; Bombsite: {config.BlockedBombsite}; Mode: {config.BarrierAction}; Status: {(barriersActive ? "LOCKED" : "UNLOCKED")}; Active barriers: {(barriersActive ? mapConfig.Barriers.Count : 0)}.");
+        Reply(player, $"Alive at round start: T={terroristPlayerCount}, CT={counterTerroristPlayerCount}; Required per team: {config.MinPlayersPerTeam}; Bombsite: {config.BlockedBombsite}; Mode: {config.BarrierAction}; Status: {(barriersActive ? "LOCKED" : "UNLOCKED")}; Active barriers: {(barriersActive ? mapConfig.Barriers.Count : 0)}.");
     }
 
     private void LoadMapConfig(string? requestedMapName = null)
@@ -282,7 +302,6 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             barrier.ClearDraw();
         }
 
-        ticksUntilPlayerCountUpdate = 0;
         MigrateLegacyConfigs();
         LoadGlobalConfig();
         if (!TrySetMapName(requestedMapName ?? Server.MapName))
@@ -302,6 +321,10 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         try
         {
             mapConfig = JsonSerializer.Deserialize<MapConfig>(File.ReadAllText(path), JsonOptions) ?? new MapConfig();
+            if (config.ShowBarriersPermanently)
+            {
+                ScheduleConfiguredBarrierDrawing();
+            }
         }
         catch (JsonException exception)
         {
@@ -438,34 +461,41 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         return true;
     }
 
-    private void UpdateBarrierState()
+    private void UpdateBarrierStateForRound()
     {
-        activePlayerCount = CountActivePlayers();
-        var shouldActivate = config.Enabled && mapConfig.Barriers.Count > 0 && activePlayerCount < config.MinPlayers;
-        if (shouldActivate == barriersActive)
-        {
-            return;
-        }
-
-        barriersActive = shouldActivate;
+        (terroristPlayerCount, counterTerroristPlayerCount) = CountAlivePlayersByTeam();
+        var isWarmup = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules")
+            .FirstOrDefault()?.GameRules?.WarmupPeriod == true;
+        barriersActive = config.Enabled &&
+            !(config.DisableBarriersDuringWarmup && isWarmup) &&
+            mapConfig.Barriers.Count > 0 &&
+            (terroristPlayerCount < config.MinPlayersPerTeam || counterTerroristPlayerCount < config.MinPlayersPerTeam);
         lastValidPositions.Clear();
-        Logger.LogInformation("DynamicBombsiteLimiter barriers for {MapName} are now {State}. Active players: {PlayerCount}; threshold: {MinPlayers}; mode: {BarrierAction}.", mapName, barriersActive ? "LOCKED" : "UNLOCKED", activePlayerCount, config.MinPlayers, config.BarrierAction);
+        Logger.LogInformation("DynamicBombsiteLimiter barriers for {MapName} are {State} for this round. Alive players at round start: T={TerroristCount}, CT={CounterTerroristCount}; required per team: {MinPlayersPerTeam}; mode: {BarrierAction}.", mapName, barriersActive ? "LOCKED" : "UNLOCKED", terroristPlayerCount, counterTerroristPlayerCount, config.MinPlayersPerTeam, config.BarrierAction);
     }
 
-    private int CountActivePlayers()
+    private (int Terrorists, int CounterTerrorists) CountAlivePlayersByTeam()
     {
-        var count = 0;
+        var terrorists = 0;
+        var counterTerrorists = 0;
         foreach (var player in Utilities.GetPlayers())
         {
-            if (!player.IsValid || !IsActiveTeam(player.Team) || (!config.CountBots && player.IsBot))
+            if (!player.IsValid || !player.PawnIsAlive || (!config.CountBots && player.IsBot))
             {
                 continue;
             }
 
-            count++;
+            if (player.Team == CsTeam.Terrorist)
+            {
+                terrorists++;
+            }
+            else if (player.Team == CsTeam.CounterTerrorist)
+            {
+                counterTerrorists++;
+            }
         }
 
-        return count;
+        return (terrorists, counterTerrorists);
     }
 
     private bool IsInsideAnyBarrier(Vector position)
@@ -567,6 +597,105 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         if (!string.IsNullOrWhiteSpace(message))
         {
             Reply(player, message.Replace("{bombsite}", config.BlockedBombsite, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    private void SendConfiguredHudMessage(CCSPlayerController player, string message, bool restricted)
+    {
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            var color = restricted ? "#FF4040" : "#00FF80";
+            var formattedMessage = message.Replace("{bombsite}", config.BlockedBombsite, StringComparison.OrdinalIgnoreCase);
+            player.PrintToCenterHtml($"<font class='fontSize-m' color='{color}'><b>{formattedMessage}</b></font>");
+        }
+    }
+
+    private void ScheduleRoundStartAnnouncement(int roundId, string message, float delaySeconds, bool restricted)
+    {
+        AddTimer(delaySeconds, () =>
+        {
+            if (roundId != roundSequence)
+            {
+                return;
+            }
+
+            foreach (var player in Utilities.GetPlayers())
+            {
+                if (player.IsValid && IsActiveTeam(player.Team))
+                {
+                    SendConfiguredMessage(player, message);
+                }
+            }
+
+            roundStartHudMessage = message;
+            roundStartHudRestricted = restricted;
+            roundStartHudExpiresAt = Server.CurrentTime + Math.Clamp(config.RoundStartHudDurationSeconds, 1, 10);
+        });
+    }
+
+    private void RefreshRoundStartHud()
+    {
+        if (roundStartHudMessage is null)
+        {
+            return;
+        }
+
+        if (Server.CurrentTime >= roundStartHudExpiresAt)
+        {
+            roundStartHudMessage = null;
+            return;
+        }
+
+        foreach (var player in Utilities.GetPlayers())
+        {
+            if (player.IsValid && IsActiveTeam(player.Team))
+            {
+                SendConfiguredHudMessage(player, roundStartHudMessage, roundStartHudRestricted);
+            }
+        }
+    }
+
+    private void ScheduleConfiguredBarrierDrawing()
+    {
+        if (barrierDrawingScheduled)
+        {
+            return;
+        }
+
+        barrierDrawingScheduled = true;
+        AddTimer(1.0f, () =>
+        {
+            barrierDrawingScheduled = false;
+            if (mapInitialized && barriersActive && config.ShowBarriersPermanently)
+            {
+                DrawConfiguredBarriers();
+            }
+            else if (!barriersActive)
+            {
+                ClearConfiguredBarrierDrawings();
+            }
+        });
+    }
+
+    private void DrawConfiguredBarriers()
+    {
+        if (!barriersActive)
+        {
+            ClearConfiguredBarrierDrawings();
+            return;
+        }
+
+        foreach (var barrier in mapConfig.Barriers)
+        {
+            barrier.Draw();
+        }
+    }
+
+    private void ClearConfiguredBarrierDrawings()
+    {
+        foreach (var barrier in mapConfig.Barriers)
+        {
+            barrier.ClearDraw();
         }
     }
 
