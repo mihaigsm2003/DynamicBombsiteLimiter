@@ -2,9 +2,6 @@
 	"folders": [
 		{
 			"path": "."
-		},
-		{
-			"path": "../cs2-WeaponPaints"
 		}
 	],
 	"settings": {}

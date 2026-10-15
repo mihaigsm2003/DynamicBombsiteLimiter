@@ -12,11 +12,11 @@ public sealed class Config
     public int HurtDamage { get; set; } = 10;
     public float BounceSpeed { get; set; } = 300.0f;
     public float BounceUpwardVelocity { get; set; } = 100.0f;
-    public string BarrierMessage { get; set; } = "Nu poti trece de aceasta bariera. Bombsite-ul {bombsite} este inchis.";
+    public string BarrierMessage { get; set; } = "You cannot pass this barrier. Bombsite {bombsite} is closed.";
     public float RoundStartHudDelaySeconds { get; set; } = 5.0f;
     public int RoundStartHudDurationSeconds { get; set; } = 5;
-    public string RoundStartMessage { get; set; } = "Nu se joaca pe toata mapa. Bombsite-ul {bombsite} este inchis in aceasta runda.";
-    public string RoundStartOpenMessage { get; set; } = "Se joaca pe toata mapa. Ambele bombsite-uri sunt deschise in aceasta runda.";
+    public string RoundStartMessage { get; set; } = "This map is not fully playable. Bombsite {bombsite} is closed this round.";
+    public string RoundStartOpenMessage { get; set; } = "This map is fully playable. Both bombsites are open this round.";
 }
 
 public enum BarrierAction

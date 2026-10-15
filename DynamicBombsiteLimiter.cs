@@ -36,19 +36,19 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     private bool mapInitialized;
 
     public override string ModuleName => "DynamicBombsiteLimiter";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleAuthor => "GSM-RO";
     public override string ModuleDescription => "Configurable logical bombsite barriers.";
 
     public override void Load(bool hotReload)
     {
-        AddCommand("css_dbl_addbarrier", "Porneste selectarea cu impacturile armei.", AddBarrierCommand);
-        AddCommand("css_dbl_removebarrier", "Sterge o bariera: css_dbl_removebarrier <numar>.", RemoveBarrierCommand);
-        AddCommand("css_dbl_list", "Afiseaza barierele hartii curente.", ListBarriersCommand);
-        AddCommand("css_dbl_preview", "Afiseaza wireframe-ul barierelor configurate.", PreviewCommand);
-        AddCommand("css_dbl_save", "Salveaza configuratia hartii curente.", SaveCommand);
-        AddCommand("css_dbl_reload", "Reincarca configuratia hartii curente.", ReloadCommand);
-        AddCommand("css_dbl_status", "Afiseaza configuratia incarcata.", StatusCommand);
+        AddCommand("css_dbl_addbarrier", "Starts barrier selection using weapon impacts.", AddBarrierCommand);
+        AddCommand("css_dbl_removebarrier", "Removes a barrier: css_dbl_removebarrier <number>.", RemoveBarrierCommand);
+        AddCommand("css_dbl_list", "Lists barriers for the current map.", ListBarriersCommand);
+        AddCommand("css_dbl_preview", "Displays a wireframe preview of configured barriers.", PreviewCommand);
+        AddCommand("css_dbl_save", "Saves the current map configuration.", SaveCommand);
+        AddCommand("css_dbl_reload", "Reloads the current map configuration.", ReloadCommand);
+        AddCommand("css_dbl_status", "Displays the loaded configuration status.", StatusCommand);
 
         RegisterEventHandler<EventBulletImpact>(OnBulletImpact);
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
@@ -76,18 +76,18 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     {
         if (player is not { IsValid: true, PawnIsAlive: true })
         {
-            Reply(player, "Comanda trebuie executata de un jucator viu.");
+            Reply(player, "You must be alive to use this command.");
             return;
         }
 
         if (pendingSelections.Remove(player.Slot))
         {
-            Reply(player, "Selectarea barierei a fost anulata.");
+            Reply(player, "Barrier selection cancelled.");
             return;
         }
 
         pendingSelections[player.Slot] = new BarrierSelection();
-        Reply(player, "Tinteste primul colt si trage o data. Apoi tinteste coltul opus si trage din nou.");
+        Reply(player, "Aim at the first corner and fire once. Then aim at the opposite corner and fire again.");
     }
 
     private HookResult OnBulletImpact(EventBulletImpact @event, GameEventInfo info)
@@ -108,7 +108,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         if (selection.FirstPoint is null)
         {
             selection.FirstPoint = new VectorData(point.X, point.Y, point.Z);
-            Reply(player, "Primul punct a fost selectat. Tinteste al doilea colt si trage din nou.");
+            Reply(player, "The first point has been selected. Aim at the second corner and fire again.");
             return HookResult.Continue;
         }
 
@@ -121,7 +121,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             barrier.Draw();
         }
 
-        Reply(player, $"Bariera #{mapConfig.Barriers.Count} creata{(barriersActive ? " si afisata" : "")}: {Format(barrier)}");
+        Reply(player, $"Barrier #{mapConfig.Barriers.Count} created{(barriersActive ? " and displayed" : "")}: {Format(barrier)}");
         return HookResult.Continue;
     }
 
@@ -229,26 +229,26 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     {
         if (command.ArgCount < 2 || !int.TryParse(command.GetArg(1), out var number) || number < 1 || number > mapConfig.Barriers.Count)
         {
-            Reply(player, "Utilizare: !dbl_removebarrier <numar>.");
+            Reply(player, "Usage: !dbl_removebarrier <number>.");
             return;
         }
 
         mapConfig.Barriers[number - 1].ClearDraw();
         mapConfig.Barriers.RemoveAt(number - 1);
-        Reply(player, $"Bariera #{number} a fost stearsa. Ruleaza !dbl_save pentru persistenta.");
+        Reply(player, $"Barrier #{number} removed. Run !dbl_save to save the change.");
     }
 
     private void ListBarriersCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (mapConfig.Barriers.Count == 0)
         {
-            Reply(player, "Nu exista bariere configurate pentru aceasta harta.");
+            Reply(player, "No barriers are configured for this map.");
             return;
         }
 
         for (var index = 0; index < mapConfig.Barriers.Count; index++)
         {
-            Reply(player, $"Bariera #{index + 1} ({mapConfig.Barriers[index].Name}): {Format(mapConfig.Barriers[index])}");
+            Reply(player, $"Barrier #{index + 1} ({mapConfig.Barriers[index].Name}): {Format(mapConfig.Barriers[index])}");
         }
     }
 
@@ -256,18 +256,18 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     {
         if (!SaveMapConfig())
         {
-            Reply(player, "Configuratia nu poate fi salvata: numele hartii nu este disponibil inca.");
+            Reply(player, "The configuration cannot be saved because the map name is not available yet.");
             return;
         }
 
-        Reply(player, $"Configuratia pentru {mapName} a fost salvata ({mapConfig.Barriers.Count} bariere).");
+        Reply(player, $"Configuration for {mapName} saved ({mapConfig.Barriers.Count} barriers).");
     }
 
     private void PreviewCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (!barriersActive)
         {
-            Reply(player, "Barierele nu sunt active. Wireframe-ul va fi afisat cand devin active.");
+            Reply(player, "Barriers are inactive. The wireframe will be displayed when they become active.");
             return;
         }
 
@@ -276,7 +276,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             barrier.Draw();
         }
 
-        Reply(player, $"Au fost afisate {mapConfig.Barriers.Count} bariere. Foloseste !dbl_preview din nou pentru a reimprospata afisarea.");
+        Reply(player, $"Displayed {mapConfig.Barriers.Count} barriers. Run !dbl_preview again to refresh the preview.");
     }
 
     private void ReloadCommand(CCSPlayerController? player, CommandInfo command)
@@ -287,7 +287,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         lastBarrierMessageTimes.Clear();
         LoadMapConfig(mapName);
         mapInitialized = !string.IsNullOrWhiteSpace(mapName);
-        Reply(player, $"Configuratia pentru {mapName} a fost reincarcata ({mapConfig.Barriers.Count} bariere).");
+        Reply(player, $"Configuration for {mapName} reloaded ({mapConfig.Barriers.Count} barriers).");
     }
 
     private void StatusCommand(CCSPlayerController? player, CommandInfo command)
