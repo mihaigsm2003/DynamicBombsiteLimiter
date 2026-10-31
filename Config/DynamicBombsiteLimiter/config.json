@@ -1,5 +1,6 @@
 {
   "Enabled": true,
+  "BarrierCommandPermission": "@css/root",
   "MinPlayersPerTeam": 5,
   "BlockedBombsite": "B",
   "CountBots": false,

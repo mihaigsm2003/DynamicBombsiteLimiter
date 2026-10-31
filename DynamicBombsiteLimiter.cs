@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
@@ -36,7 +37,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     private bool mapInitialized;
 
     public override string ModuleName => "DynamicBombsiteLimiter";
-    public override string ModuleVersion => "1.0.1";
+    public override string ModuleVersion => "1.0.2";
     public override string ModuleAuthor => "GSM-RO";
     public override string ModuleDescription => "Configurable logical bombsite barriers.";
 
@@ -74,6 +75,11 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
     private void AddBarrierCommand(CCSPlayerController? player, CommandInfo command)
     {
+        if (!HasBarrierCommandPermission(player))
+        {
+            return;
+        }
+
         if (player is not { IsValid: true, PawnIsAlive: true })
         {
             Reply(player, "You must be alive to use this command.");
@@ -95,6 +101,12 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         var player = @event.Userid;
         if (player is not { IsValid: true } || !pendingSelections.TryGetValue(player.Slot, out var selection))
         {
+            return HookResult.Continue;
+        }
+
+        if (!HasBarrierCommandPermission(player))
+        {
+            pendingSelections.Remove(player.Slot);
             return HookResult.Continue;
         }
 
@@ -227,6 +239,11 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
     private void RemoveBarrierCommand(CCSPlayerController? player, CommandInfo command)
     {
+        if (!HasBarrierCommandPermission(player))
+        {
+            return;
+        }
+
         if (command.ArgCount < 2 || !int.TryParse(command.GetArg(1), out var number) || number < 1 || number > mapConfig.Barriers.Count)
         {
             Reply(player, "Usage: !dbl_removebarrier <number>.");
@@ -254,6 +271,11 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
     private void SaveCommand(CCSPlayerController? player, CommandInfo command)
     {
+        if (!HasBarrierCommandPermission(player))
+        {
+            return;
+        }
+
         if (!SaveMapConfig())
         {
             Reply(player, "The configuration cannot be saved because the map name is not available yet.");
@@ -281,6 +303,11 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
     private void ReloadCommand(CCSPlayerController? player, CommandInfo command)
     {
+        if (!HasBarrierCommandPermission(player))
+        {
+            return;
+        }
+
         pendingSelections.Clear();
         lastValidPositions.Clear();
         lastActionTimes.Clear();
@@ -288,6 +315,34 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         LoadMapConfig(mapName);
         mapInitialized = !string.IsNullOrWhiteSpace(mapName);
         Reply(player, $"Configuration for {mapName} reloaded ({mapConfig.Barriers.Count} barriers).");
+    }
+
+    private bool HasBarrierCommandPermission(CCSPlayerController? player)
+    {
+        if (player is null)
+        {
+            return true;
+        }
+
+        if (!player.IsValid)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(config.BarrierCommandPermission))
+        {
+            Logger.LogError("DynamicBombsiteLimiter.BarrierCommandPermission is empty; barrier management commands are denied.");
+            Reply(player, "Barrier management commands are unavailable because their permission is not configured.");
+            return false;
+        }
+
+        if (AdminManager.PlayerHasPermissions(player, config.BarrierCommandPermission.Trim()))
+        {
+            return true;
+        }
+
+        Reply(player, "You do not have permission to use this command.");
+        return false;
     }
 
     private void StatusCommand(CCSPlayerController? player, CommandInfo command)

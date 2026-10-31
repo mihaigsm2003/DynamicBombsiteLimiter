@@ -3,6 +3,7 @@ namespace DynamicBombsiteLimiter;
 public sealed class Config
 {
     public bool Enabled { get; set; } = true;
+    public string BarrierCommandPermission { get; set; } = "@css/root";
     public bool DisableBarriersDuringWarmup { get; set; } = true;
     public int MinPlayersPerTeam { get; set; } = 5;
     public string BlockedBombsite { get; set; } = "B";

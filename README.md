@@ -60,6 +60,7 @@ The global configuration is stored in `config.json`. If the file does not exist,
 ```json
 {
   "Enabled": true,
+  "BarrierCommandPermission": "@css/root",
   "MinPlayersPerTeam": 5,
   "BlockedBombsite": "B",
   "CountBots": false,
@@ -81,6 +82,7 @@ The global configuration is stored in `config.json`. If the file does not exist,
 | Option | Description |
 | --- | --- |
 | `Enabled` | Enables or disables the plugin. |
+| `BarrierCommandPermission` | CounterStrikeSharp permission required for barrier creation, removal, saving, and reloading. Defaults to `@css/root`. Server console commands are allowed. |
 | `MinPlayersPerTeam` | Minimum alive players required on both T and CT at round start. Barriers activate if either team is below this value. |
 | `BlockedBombsite` | Bombsite name used in messages, for example `A` or `B`. |
 | `CountBots` | Includes alive bots in the per-team counts when enabled. |
