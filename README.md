@@ -14,7 +14,9 @@ It allows server administrators to define custom 3D barriers around bombsites or
 - Optional bot counting.
 - Round state is fixed for the rest of the round; player-count changes do not enable or disable barriers mid-round.
 - A configurable round-start delay, followed by a center-screen HUD message and a chat announcement.
-- Optional persistent wireframe rendering of configured barriers.
+- Optional persistent wireframe rendering of configured barriers, visible only to admins.
+- Impenetrable barriers: while active, bullets, knives, grenades, fire, and flashes cannot pass through them.
+- Colored chat messages with a configurable prefix, stored in per-language lang files.
 - Five barrier interaction modes:
   - `Wall` - pushes the player back to their last valid position.
   - `Teleport` - sends the player back to their spawn position.
@@ -22,7 +24,7 @@ It allows server administrators to define custom 3D barriers around bombsites or
   - `Hurt` - periodically deals configurable damage.
   - `Kill` - eliminates the player.
 - In-game barrier creation using weapon bullet impacts.
-- Wireframe preview for configured barriers.
+- Wireframe preview for configured barriers (admins only).
 - JSON configuration files that can be edited manually or managed in-game.
 
 ## Requirements
@@ -39,7 +41,7 @@ It allows server administrators to define custom 3D barriers around bombsites or
   dotnet build .\DynamicBombsiteLimiter.csproj -c Release
    ```
 
-2. Copy `bin/Release/net10.0/DynamicBombsiteLimiter.dll` to:
+2. Copy `bin/Release/net10.0/DynamicBombsiteLimiter.dll` and the `bin/Release/net10.0/lang/` folder to:
 
    ```text
    <csgo>/addons/counterstrikesharp/plugins/DynamicBombsiteLimiter/
@@ -69,11 +71,8 @@ The global configuration is stored in `config.json`. If the file does not exist,
   "HurtDamage": 10,
   "BounceSpeed": 300,
   "BounceUpwardVelocity": 100,
-  "BarrierMessage": "Nu poti trece de aceasta bariera. Bombsite-ul {bombsite} este inchis.",
   "RoundStartHudDelaySeconds": 5,
-  "RoundStartHudDurationSeconds": 5,
-  "RoundStartMessage": "Nu se joaca pe toata mapa. Bombsite-ul {bombsite} este inchis in aceasta runda.",
-  "RoundStartOpenMessage": "Se joaca pe toata mapa. Ambele bombsite-uri sunt deschise in aceasta runda."
+  "RoundStartHudDurationSeconds": 5
 }
 ```
 
@@ -91,18 +90,43 @@ The global configuration is stored in `config.json`. If the file does not exist,
 | `HurtDamage` | Damage dealt per second when `BarrierAction` is `Hurt`. |
 | `BounceSpeed` | Horizontal speed used by the `Bounce` action. |
 | `BounceUpwardVelocity` | Upward velocity used by the `Bounce` action. |
-| `BarrierMessage` | Chat message shown when a player enters a barrier. Supports the `{bombsite}` placeholder. |
 | `RoundStartHudDelaySeconds` | Delay after round start before the HUD and chat announcements are sent. |
-| `RoundStartMessage` | Round-start message used while barriers are active. Supports the `{bombsite}` placeholder. |
-| `RoundStartOpenMessage` | Round-start message used when both bombsites are open. |
+| `RoundStartHudDurationSeconds` | How long the round-start HUD stays on screen, from 1 to 10 seconds. |
 
-The round-start HUD uses plain center-screen text and is refreshed four times at one-second intervals. The chat announcement is sent once. `RoundStartHudDurationSeconds` may still appear in older or generated config files, but is currently ignored.
+The chat announcement is sent once. `BarrierMessage`, `RoundStartMessage`, and `RoundStartOpenMessage` are no longer read from `config.json`. Those messages now live in the lang files.
 
 Map-specific barriers are stored in:
 
 ```text
 <csgo>/addons/counterstrikesharp/configs/plugins/DynamicBombsiteLimiter/maps/<map_name>.json
 ```
+
+## Messages and colors
+
+Messages are stored next to the plugin DLL in `lang/en.json` and `lang/ro.json`. To add a language, copy a file and name it after the language code. Each player sees their CounterStrikeSharp language. The server language is used otherwise.
+
+- `Prefix` is added to every chat message. Leave it empty for no prefix.
+- Chat messages support color tags such as `{green}`, `{red}`, `{lightblue}`, `{gold}`, and `{default}`.
+- `{0}`, `{1}`, and so on are filled in by the plugin. Keep them in your text.
+- `Hud.Restricted` and `Hud.Open` are center-screen messages. They use HTML, not color tags, for example `<font color='#FF4040'>text</font>`.
+
+## Barrier visibility and blocking
+
+Barrier wireframes are sent only to players with `BarrierCommandPermission`. This applies to both `ShowBarriersPermanently` and `!dbl_preview`. Permissions are checked when a player spawns and on `!dbl_reload`.
+
+While barriers are active, in every `BarrierAction` mode:
+
+- Bullet and knife damage that crosses a barrier is cancelled.
+- HE and fire damage that crosses a barrier is cancelled.
+- Grenades bounce off barriers.
+- Flashes do not blind players across a barrier.
+
+Limitations:
+
+- Tracers and bullet holes can appear past a barrier, but no damage is dealt.
+- Smoke and fire that start next to a barrier can visually spread through it. Fire across a barrier deals no damage.
+- Smoke that spreads through a barrier still blocks vision on the far side.
+- Bomb explosions are not blocked.
 
 ## In-game commands
 

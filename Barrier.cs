@@ -1,4 +1,5 @@
 using System.Drawing;
+using Vector3 = System.Numerics.Vector3;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
@@ -17,6 +18,8 @@ public sealed class Barrier
 
     [JsonIgnore]
     public List<CBeam> Beams { get; } = [];
+
+    public BarrierBox ToBox() => new(new Vector3(Min.X, Min.Y, Min.Z), new Vector3(Max.X, Max.Y, Max.Z));
 
     public bool IntersectsPlayer(Vector origin) =>
         origin.X + PlayerHalfWidth >= Min.X && origin.X - PlayerHalfWidth <= Max.X &&
