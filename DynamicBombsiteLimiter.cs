@@ -2,17 +2,21 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core.Translations;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
+using Vector3 = System.Numerics.Vector3;
 
 namespace DynamicBombsiteLimiter;
 
 public sealed class DynamicBombsiteLimiter : BasePlugin
 {
     private const float BarrierMessageCooldownSeconds = 2.0f;
-    private const string ChatPrefix = " \x04[DBL]\x01";
+    private const float BodyCenterHeight = 36.0f;
+    private const float FallbackEyeHeight = 64.0f;
+    private const float GrenadeBounceScale = 0.6f;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -23,12 +27,15 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     private readonly Dictionary<int, VectorData> spawnPositions = [];
     private readonly Dictionary<int, float> lastActionTimes = [];
     private readonly Dictionary<int, float> lastBarrierMessageTimes = [];
+    private readonly HashSet<int> beamViewerSlots = [];
+    private readonly List<TrackedProjectile> trackedProjectiles = [];
+    private readonly HashSet<string> reportedBadMessages = [];
     private Config config = new();
     private MapConfig mapConfig = new();
     private string mapName = string.Empty;
-    private string? roundStartHudMessage;
+    private string? roundStartHudKey;
+    private Vector3? lastFlashPosition;
     private float roundStartHudExpiresAt;
-    private bool roundStartHudRestricted;
     private int terroristPlayerCount;
     private int counterTerroristPlayerCount;
     private int roundSequence;
@@ -37,7 +44,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     private bool mapInitialized;
 
     public override string ModuleName => "DynamicBombsiteLimiter";
-    public override string ModuleVersion => "1.0.2";
+    public override string ModuleVersion => "1.1.0";
     public override string ModuleAuthor => "GSM-RO";
     public override string ModuleDescription => "Configurable logical bombsite barriers.";
 
@@ -54,8 +61,14 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         RegisterEventHandler<EventBulletImpact>(OnBulletImpact);
         RegisterEventHandler<EventRoundStart>(OnRoundStart);
         RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
+        RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
+        RegisterEventHandler<EventFlashbangDetonate>(OnFlashbangDetonate);
+        RegisterEventHandler<EventPlayerBlind>(OnPlayerBlind);
+        RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        RegisterListener<Listeners.OnPlayerTakeDamagePre>(OnPlayerTakeDamagePre);
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnTick>(OnTick);
+        RegisterListener<Listeners.OnEntitySpawned>(OnEntitySpawned);
         Logger.LogInformation("{PluginName} loaded and waiting for map initialization.", ModuleName);
     }
 
@@ -66,7 +79,9 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         spawnPositions.Clear();
         lastActionTimes.Clear();
         lastBarrierMessageTimes.Clear();
-        roundStartHudMessage = null;
+        beamViewerSlots.Clear();
+        trackedProjectiles.Clear();
+        roundStartHudKey = null;
         foreach (var barrier in mapConfig.Barriers)
         {
             barrier.ClearDraw();
@@ -82,18 +97,18 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
         if (player is not { IsValid: true, PawnIsAlive: true })
         {
-            Reply(player, "You must be alive to use this command.");
+            Reply(player, "Error.MustBeAlive");
             return;
         }
 
         if (pendingSelections.Remove(player.Slot))
         {
-            Reply(player, "Barrier selection cancelled.");
+            Reply(player, "Selection.Cancelled");
             return;
         }
 
         pendingSelections[player.Slot] = new BarrierSelection();
-        Reply(player, "Aim at the first corner and fire once. Then aim at the opposite corner and fire again.");
+        Reply(player, "Selection.Start");
     }
 
     private HookResult OnBulletImpact(EventBulletImpact @event, GameEventInfo info)
@@ -120,7 +135,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         if (selection.FirstPoint is null)
         {
             selection.FirstPoint = new VectorData(point.X, point.Y, point.Z);
-            Reply(player, "The first point has been selected. Aim at the second corner and fire again.");
+            Reply(player, "Selection.FirstPoint");
             return HookResult.Continue;
         }
 
@@ -133,23 +148,24 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             barrier.Draw();
         }
 
-        Reply(player, $"Barrier #{mapConfig.Barriers.Count} created{(barriersActive ? " and displayed" : "")}: {Format(barrier)}");
+        Reply(player, barriersActive ? "Barrier.CreatedDisplayed" : "Barrier.Created", mapConfig.Barriers.Count, Format(barrier));
         return HookResult.Continue;
     }
 
     private HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
     {
+        trackedProjectiles.Clear();
+        lastFlashPosition = null;
         lastValidPositions.Clear();
         lastActionTimes.Clear();
         lastBarrierMessageTimes.Clear();
-        roundStartHudMessage = null;
+        roundStartHudKey = null;
         UpdateBarrierStateForRound();
         if (!barriersActive)
         {
             ClearConfiguredBarrierDrawings();
         }
 
-        var roundMessage = barriersActive ? config.RoundStartMessage : config.RoundStartOpenMessage;
         var currentRoundSequence = ++roundSequence;
         if (barriersActive && config.ShowBarriersPermanently)
         {
@@ -158,7 +174,6 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
         ScheduleRoundStartAnnouncement(
             currentRoundSequence,
-            roundMessage,
             Math.Max(0.0f, config.RoundStartHudDelaySeconds),
             barriersActive);
 
@@ -174,18 +189,62 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             spawnPositions[player.Slot] = new VectorData(origin.X, origin.Y, origin.Z);
         }
 
+        if (player is { IsValid: true })
+        {
+            RefreshBeamViewer(player);
+        }
+
         return HookResult.Continue;
+    }
+
+    private HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
+    {
+        if (@event.Userid is { IsValid: true } player)
+        {
+            beamViewerSlots.Remove(player.Slot);
+        }
+
+        return HookResult.Continue;
+    }
+
+    private void OnCheckTransmit(CCheckTransmitInfoList infoList)
+    {
+        if (mapConfig.Barriers.All(barrier => barrier.Beams.Count == 0))
+        {
+            return;
+        }
+
+        foreach ((CCheckTransmitInfo info, CCSPlayerController? player) in infoList)
+        {
+            if (player is not null && beamViewerSlots.Contains(player.Slot))
+            {
+                continue;
+            }
+
+            foreach (var barrier in mapConfig.Barriers)
+            {
+                foreach (var beam in barrier.Beams)
+                {
+                    if (beam.IsValid)
+                    {
+                        info.TransmitEntities.Remove(beam);
+                    }
+                }
+            }
+        }
     }
 
     private void OnMapStart(string newMapName)
     {
         roundSequence++;
         pendingSelections.Clear();
+        beamViewerSlots.Clear();
+        trackedProjectiles.Clear();
         lastValidPositions.Clear();
         spawnPositions.Clear();
         lastActionTimes.Clear();
         lastBarrierMessageTimes.Clear();
-        roundStartHudMessage = null;
+        roundStartHudKey = null;
         LoadMapConfig(newMapName);
         mapInitialized = true;
         barriersActive = false;
@@ -211,6 +270,8 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         {
             return;
         }
+
+        UpdateProjectiles();
 
         foreach (var player in Utilities.GetPlayers())
         {
@@ -246,26 +307,26 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
         if (command.ArgCount < 2 || !int.TryParse(command.GetArg(1), out var number) || number < 1 || number > mapConfig.Barriers.Count)
         {
-            Reply(player, "Usage: !dbl_removebarrier <number>.");
+            Reply(player, "Barrier.RemoveUsage");
             return;
         }
 
         mapConfig.Barriers[number - 1].ClearDraw();
         mapConfig.Barriers.RemoveAt(number - 1);
-        Reply(player, $"Barrier #{number} removed. Run !dbl_save to save the change.");
+        Reply(player, "Barrier.Removed", number);
     }
 
     private void ListBarriersCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (mapConfig.Barriers.Count == 0)
         {
-            Reply(player, "No barriers are configured for this map.");
+            Reply(player, "List.Empty");
             return;
         }
 
         for (var index = 0; index < mapConfig.Barriers.Count; index++)
         {
-            Reply(player, $"Barrier #{index + 1} ({mapConfig.Barriers[index].Name}): {Format(mapConfig.Barriers[index])}");
+            Reply(player, "List.Entry", index + 1, mapConfig.Barriers[index].Name, Format(mapConfig.Barriers[index]));
         }
     }
 
@@ -278,18 +339,18 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
 
         if (!SaveMapConfig())
         {
-            Reply(player, "The configuration cannot be saved because the map name is not available yet.");
+            Reply(player, "Save.Failed");
             return;
         }
 
-        Reply(player, $"Configuration for {mapName} saved ({mapConfig.Barriers.Count} barriers).");
+        Reply(player, "Save.Done", mapName, mapConfig.Barriers.Count);
     }
 
     private void PreviewCommand(CCSPlayerController? player, CommandInfo command)
     {
         if (!barriersActive)
         {
-            Reply(player, "Barriers are inactive. The wireframe will be displayed when they become active.");
+            Reply(player, "Preview.Inactive");
             return;
         }
 
@@ -298,7 +359,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             barrier.Draw();
         }
 
-        Reply(player, $"Displayed {mapConfig.Barriers.Count} barriers. Run !dbl_preview again to refresh the preview.");
+        Reply(player, "Preview.Done", mapConfig.Barriers.Count);
     }
 
     private void ReloadCommand(CCSPlayerController? player, CommandInfo command)
@@ -314,7 +375,12 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         lastBarrierMessageTimes.Clear();
         LoadMapConfig(mapName);
         mapInitialized = !string.IsNullOrWhiteSpace(mapName);
-        Reply(player, $"Configuration for {mapName} reloaded ({mapConfig.Barriers.Count} barriers).");
+        foreach (var connectedPlayer in Utilities.GetPlayers())
+        {
+            RefreshBeamViewer(connectedPlayer);
+        }
+
+        Reply(player, "Reload.Done", mapName, mapConfig.Barriers.Count);
     }
 
     private bool HasBarrierCommandPermission(CCSPlayerController? player)
@@ -332,7 +398,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         if (string.IsNullOrWhiteSpace(config.BarrierCommandPermission))
         {
             Logger.LogError("DynamicBombsiteLimiter.BarrierCommandPermission is empty; barrier management commands are denied.");
-            Reply(player, "Barrier management commands are unavailable because their permission is not configured.");
+            Reply(player, "Perm.NotConfigured");
             return false;
         }
 
@@ -341,13 +407,30 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             return true;
         }
 
-        Reply(player, "You do not have permission to use this command.");
+        Reply(player, "Perm.Denied");
         return false;
+    }
+
+    private bool IsBarrierAdmin(CCSPlayerController player) =>
+        player is { IsValid: true, IsBot: false } &&
+        !string.IsNullOrWhiteSpace(config.BarrierCommandPermission) &&
+        AdminManager.PlayerHasPermissions(player, config.BarrierCommandPermission.Trim());
+
+    private void RefreshBeamViewer(CCSPlayerController player)
+    {
+        if (IsBarrierAdmin(player))
+        {
+            beamViewerSlots.Add(player.Slot);
+        }
+        else
+        {
+            beamViewerSlots.Remove(player.Slot);
+        }
     }
 
     private void StatusCommand(CCSPlayerController? player, CommandInfo command)
     {
-        Reply(player, $"Alive at round start: T={terroristPlayerCount}, CT={counterTerroristPlayerCount}; Required per team: {config.MinPlayersPerTeam}; Bombsite: {config.BlockedBombsite}; Mode: {config.BarrierAction}; Status: {(barriersActive ? "LOCKED" : "UNLOCKED")}; Active barriers: {(barriersActive ? mapConfig.Barriers.Count : 0)}.");
+        Reply(player, "Status.Line", terroristPlayerCount, counterTerroristPlayerCount, config.MinPlayersPerTeam, config.BlockedBombsite, config.BarrierAction, barriersActive ? "LOCKED" : "UNLOCKED", barriersActive ? mapConfig.Barriers.Count : 0);
     }
 
     private void LoadMapConfig(string? requestedMapName = null)
@@ -553,6 +636,153 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         return (terrorists, counterTerrorists);
     }
 
+    private HookResult OnFlashbangDetonate(EventFlashbangDetonate @event, GameEventInfo info)
+    {
+        lastFlashPosition = new Vector3(@event.X, @event.Y, @event.Z);
+        return HookResult.Continue;
+    }
+
+    private HookResult OnPlayerBlind(EventPlayerBlind @event, GameEventInfo info)
+    {
+        if (barriersActive && @event.Userid is { IsValid: true } player)
+        {
+            // The detonate event may fire after this one, so wait until both have run.
+            Server.NextFrame(() => CancelFlashAcrossBarrier(player));
+        }
+
+        return HookResult.Continue;
+    }
+
+    private void CancelFlashAcrossBarrier(CCSPlayerController player)
+    {
+        if (!player.IsValid || lastFlashPosition is not { } flash)
+        {
+            return;
+        }
+
+        var pawn = player.PlayerPawn.Value;
+        if (pawn is null || !pawn.IsValid || GetEyePosition(pawn) is not { } eye || !CrossesBarrier(flash, eye))
+        {
+            return;
+        }
+
+        pawn.FlashDuration = 0.0f;
+        Utilities.SetStateChanged(pawn, "CCSPlayerPawnBase", "m_flFlashDuration");
+    }
+
+    private void OnEntitySpawned(CEntityInstance entity)
+    {
+        if (entity.DesignerName.EndsWith("_projectile", StringComparison.Ordinal))
+        {
+            trackedProjectiles.Add(new TrackedProjectile(entity.EntityHandle));
+        }
+    }
+
+    private void UpdateProjectiles()
+    {
+        if (trackedProjectiles.Count == 0)
+        {
+            return;
+        }
+
+        var boxes = mapConfig.Barriers.Select(barrier => barrier.ToBox()).ToList();
+        for (var index = trackedProjectiles.Count - 1; index >= 0; index--)
+        {
+            var tracked = trackedProjectiles[index];
+            var entity = tracked.Handle.Value;
+            if (entity is null || !entity.IsValid)
+            {
+                trackedProjectiles.RemoveAt(index);
+                continue;
+            }
+
+            var projectile = entity.As<CBaseCSGrenadeProjectile>();
+            if (projectile.AbsOrigin is not { } origin)
+            {
+                continue;
+            }
+
+            var current = ToNumerics(origin);
+            if (tracked.LastPosition is not { } last)
+            {
+                tracked.LastPosition = current;
+                continue;
+            }
+
+            if (BarrierProtection.FindNearestHit(last, current, boxes) is not { } hit)
+            {
+                tracked.LastPosition = current;
+                continue;
+            }
+
+            var bounced = BarrierProtection.Reflect(ToNumerics(projectile.AbsVelocity), hit.Normal, GrenadeBounceScale);
+            projectile.Teleport(new Vector(last.X, last.Y, last.Z), velocity: new Vector(bounced.X, bounced.Y, bounced.Z));
+        }
+    }
+
+    private HookResult OnPlayerTakeDamagePre(CCSPlayerPawn victim, CTakeDamageInfo info)
+    {
+        if (!barriersActive || victim.AbsOrigin is not { } victimOrigin)
+        {
+            return HookResult.Continue;
+        }
+
+        var bodyCenter = ToNumerics(victimOrigin) + new Vector3(0, 0, BodyCenterHeight);
+        Vector3 start;
+        Vector3 end;
+        var inflictor = info.Inflictor.Value;
+        if (inflictor is { IsValid: true } && IsAreaDamageSource(inflictor.DesignerName))
+        {
+            if (inflictor.AbsOrigin is not { } inflictorOrigin)
+            {
+                return HookResult.Continue;
+            }
+
+            start = ToNumerics(inflictorOrigin);
+            end = bodyCenter;
+        }
+        else
+        {
+            if (info.Attacker.Value is not { IsValid: true, DesignerName: "player" } attacker ||
+                attacker.Handle == victim.Handle ||
+                !IsDirectWeaponDamage(inflictor, attacker) ||
+                GetEyePosition(attacker.As<CCSPlayerPawn>()) is not { } eye)
+            {
+                return HookResult.Continue;
+            }
+
+            var damagePosition = ToNumerics(info.DamagePosition);
+            start = eye;
+            end = damagePosition == Vector3.Zero ? bodyCenter : damagePosition;
+        }
+
+        return CrossesBarrier(start, end) ? HookResult.Handled : HookResult.Continue;
+    }
+
+    private static bool IsDirectWeaponDamage(CBaseEntity? inflictor, CBaseEntity attacker) =>
+        inflictor is { IsValid: true } &&
+        (inflictor.Handle == attacker.Handle ||
+         inflictor.DesignerName.StartsWith("weapon_", StringComparison.Ordinal));
+
+    private static bool IsAreaDamageSource(string designerName) =>
+        designerName == "inferno" || designerName.EndsWith("_projectile", StringComparison.Ordinal);
+
+    private bool CrossesBarrier(Vector3 start, Vector3 end) =>
+        BarrierProtection.FindNearestHit(start, end, mapConfig.Barriers.Select(barrier => barrier.ToBox())) is not null;
+
+    private static Vector3? GetEyePosition(CCSPlayerPawn pawn)
+    {
+        if (pawn.AbsOrigin is not { } origin)
+        {
+            return null;
+        }
+
+        var eyeHeight = pawn.ViewOffset.Z > 0 ? pawn.ViewOffset.Z : FallbackEyeHeight;
+        return ToNumerics(origin) + new Vector3(0, 0, eyeHeight);
+    }
+
+    private static Vector3 ToNumerics(Vector vector) => new(vector.X, vector.Y, vector.Z);
+
     private bool IsInsideAnyBarrier(Vector position)
     {
         foreach (var barrier in mapConfig.Barriers)
@@ -572,7 +802,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             Server.CurrentTime - lastMessageTime >= BarrierMessageCooldownSeconds)
         {
             lastBarrierMessageTimes[player.Slot] = Server.CurrentTime;
-            SendConfiguredMessage(player, config.BarrierMessage);
+            Reply(player, "Barrier.Blocked", config.BlockedBombsite);
         }
 
         switch (config.BarrierAction)
@@ -647,25 +877,10 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
     private static string Format(Barrier barrier) =>
         $"Min: {barrier.Min.X:F1} {barrier.Min.Y:F1} {barrier.Min.Z:F1}; Max: {barrier.Max.X:F1} {barrier.Max.Y:F1} {barrier.Max.Z:F1}";
 
-    private void SendConfiguredMessage(CCSPlayerController player, string message)
-    {
-        if (!string.IsNullOrWhiteSpace(message))
-        {
-            Reply(player, message.Replace("{bombsite}", config.BlockedBombsite, StringComparison.OrdinalIgnoreCase));
-        }
-    }
+    private void SendRoundStartHud(CCSPlayerController player, string key) =>
+        player.PrintToCenterHtml(ResolveMessage(player, key, config.BlockedBombsite));
 
-    private void SendConfiguredHudMessage(CCSPlayerController player, string message, bool restricted)
-    {
-        if (!string.IsNullOrWhiteSpace(message))
-        {
-            var color = restricted ? "#FF4040" : "#00FF80";
-            var formattedMessage = message.Replace("{bombsite}", config.BlockedBombsite, StringComparison.OrdinalIgnoreCase);
-            player.PrintToCenterHtml($"<font class='fontSize-m' color='{color}'><b>{formattedMessage}</b></font>");
-        }
-    }
-
-    private void ScheduleRoundStartAnnouncement(int roundId, string message, float delaySeconds, bool restricted)
+    private void ScheduleRoundStartAnnouncement(int roundId, float delaySeconds, bool restricted)
     {
         AddTimer(delaySeconds, () =>
         {
@@ -678,26 +893,25 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
             {
                 if (player.IsValid && IsActiveTeam(player.Team))
                 {
-                    SendConfiguredMessage(player, message);
+                    Reply(player, restricted ? "Round.Restricted" : "Round.Open", config.BlockedBombsite);
                 }
             }
 
-            roundStartHudMessage = message;
-            roundStartHudRestricted = restricted;
+            roundStartHudKey = restricted ? "Hud.Restricted" : "Hud.Open";
             roundStartHudExpiresAt = Server.CurrentTime + Math.Clamp(config.RoundStartHudDurationSeconds, 1, 10);
         });
     }
 
     private void RefreshRoundStartHud()
     {
-        if (roundStartHudMessage is null)
+        if (roundStartHudKey is null)
         {
             return;
         }
 
         if (Server.CurrentTime >= roundStartHudExpiresAt)
         {
-            roundStartHudMessage = null;
+            roundStartHudKey = null;
             return;
         }
 
@@ -705,7 +919,7 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         {
             if (player.IsValid && IsActiveTeam(player.Team))
             {
-                SendConfiguredHudMessage(player, roundStartHudMessage, roundStartHudRestricted);
+                SendRoundStartHud(player, roundStartHudKey);
             }
         }
     }
@@ -754,15 +968,44 @@ public sealed class DynamicBombsiteLimiter : BasePlugin
         }
     }
 
-    private void Reply(CCSPlayerController? player, string message)
+    private void Reply(CCSPlayerController? player, string key, params object[] args)
     {
+        var message = ResolveMessage(player, key, args);
         if (player is null)
         {
-            Logger.LogInformation("[DBL] {Message}", message);
+            Logger.LogInformation("[DBL] {Message}", MessageFormatter.StripForConsole(message));
             return;
         }
 
-        player.PrintToChat($"{ChatPrefix} {message}");
+        player.PrintToChat(MessageFormatter.BuildChat(ResolveMessage(player, "Prefix"), message));
+    }
+
+    private string ResolveMessage(CCSPlayerController? player, string key, params object[] args)
+    {
+        // ForPlayer throws for bots and other players with no SteamID.
+        var raw = player is null || player.IsBot || player.SteamID == 0
+            ? Localizer[key].Value
+            : Localizer.ForPlayer(player, key);
+
+        // ReplaceColorTags adds one leading space, and BuildChat adds its own.
+        var colored = raw.ReplaceColorTags().Trim();
+        if (args.Length == 0)
+        {
+            return colored;
+        }
+
+        if (!MessageFormatter.TryFormat(colored, args, out var formatted) && reportedBadMessages.Add(key))
+        {
+            Logger.LogError("Lang key {Key} has invalid placeholders. Check its braces.", key);
+        }
+
+        return formatted;
+    }
+
+    private sealed class TrackedProjectile(CHandle<CEntityInstance> handle)
+    {
+        public CHandle<CEntityInstance> Handle { get; } = handle;
+        public Vector3? LastPosition { get; set; }
     }
 
     private sealed class BarrierSelection
